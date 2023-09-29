@@ -1,0 +1,44 @@
+# Ignore Visual Studio files
+.vscode/
+*.suo
+*.sdf
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.vcproj
+*.dbproj
+*.tlog
+*.log
+*.pdb
+.vs/
+# Ignore Windows image file caches and thumbnails
+Thumbs.db
+ehthumbs.db
+
+# Ignore user-specific files and directories
+[Dd]esktop.ini
+$RECYCLE.BIN/
+*.bak
+*.swp
+
+# Ignore Windows Installer files
+*.cab
+*.msi
+*.msm
+*.msp
+
+# Ignore Visual Studio Code directories
+.vscode/
+
+# Ignore compiled binary files
+*.dll
+*.exe
+
+# Ignore output folders
+bin/
+obj/
+
+# Ignore system files that might appear on external drives
+$Recycle.Bin/
+System Volume Information/
