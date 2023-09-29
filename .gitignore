@@ -38,7 +38,7 @@ $RECYCLE.BIN/
 # Ignore output folders
 bin/
 obj/
-
+/**/x64/
 # Ignore system files that might appear on external drives
 $Recycle.Bin/
 System Volume Information/
