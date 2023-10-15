@@ -1,10 +1,14 @@
 #include <windows.h>
 #include <richedit.h> 
 #include <string>
+#include <sstream>
+#include <iomanip>
+#include <vector>
+#include <tchar.h>
 #include "Richedit.h"
 #include "commctrl.h"
+#include <iostream>
 #define RICHEDIT_CLASS L"RICHEDIT50W"
-
 #define IDM_OPEN  1001
 #define IDM_SAVE  1002
 #define IDM_EXIT  1003
@@ -14,26 +18,43 @@
 #define IDM_SEARCH_IN_SEARCH_WINDOW 1008
 #define IDM_CHANGE_THEME 1009
 #define IDM_CHANGE_FONT 1010
+#define IDM_OPEN_BINARY 1011
+#define IDM_SAVE_BINARY 1012
+#define IDC_START_COUNT 2
+#define IDC_WORD_LIST 3
+#define WM_UPDATE_WORD_COUNT 6
+#define IDC_STOP_COUNT 5
 #define HOTKEY_ID 1
 
 LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
 LRESULT CALLBACK SearchWindowProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
-
-static HWND hEdit = nullptr;
+static int wordsCount = 0; 
+static HWND hEdit;
 static HWND hSearchEdit = nullptr;
 static int searchStartPosition = 0;
 static HWND hSearchWindow = nullptr;
+HWND g_hwnd;
+HANDLE g_hFileMapping;
+LPVOID g_pFileData;
+DWORD g_fileSize;
+bool g_bIsWordCountThreadRunning = true;
+HANDLE hThread = nullptr;
+UINT_PTR timerId;
+struct ThreadParams {
+    HWND hWnd;
+    // Другие параметры, если необходимо
+};
 void OpenSearchWindow(HWND hWnd)
 {
     hSearchWindow = CreateWindow(
-        L"SearchWindowClass",   
-        L"Search Window",       
-        WS_OVERLAPPEDWINDOW,    
-        CW_USEDEFAULT, CW_USEDEFAULT, 400, 200, 
-        nullptr,               
-        nullptr,               
-        GetModuleHandle(nullptr), 
-        nullptr                
+        L"SearchWindowClass",
+        L"Search Window",
+        WS_OVERLAPPEDWINDOW,
+        CW_USEDEFAULT, CW_USEDEFAULT, 400, 200,
+        nullptr,
+        nullptr,
+        GetModuleHandle(nullptr),
+        nullptr
     );
 
     if (hSearchWindow != nullptr)
@@ -54,9 +75,9 @@ void OpenSearchWindow(HWND hWnd)
             L"BUTTON",
             L"Search",
             WS_TABSTOP | WS_VISIBLE | WS_CHILD | BS_DEFPUSHBUTTON,
-            170, 10, 80, 30, 
+            170, 10, 80, 30,
             hSearchWindow,
-            reinterpret_cast<HMENU>(IDM_SEARCH_IN_SEARCH_WINDOW), 
+            reinterpret_cast<HMENU>(IDM_SEARCH_IN_SEARCH_WINDOW),
             GetModuleHandle(nullptr),
             nullptr
         );
@@ -73,6 +94,44 @@ void OpenSearchWindow(HWND hWnd)
     {
         MessageBox(hWnd, L"Не удалось создать окно поиска.", L"Ошибка", MB_OK | MB_ICONERROR);
     }
+}
+
+DWORD WINAPI WordCountThread(LPVOID lpParam) {
+    ThreadParams* params = reinterpret_cast<ThreadParams*>(lpParam);
+    HWND hWnd = params->hWnd;
+
+    while (g_bIsWordCountThreadRunning) {
+        int textLength = GetWindowTextLength(hEdit);
+
+        if (textLength > 0) {
+            std::wstring text;
+            text.resize(textLength + 1);
+            GetWindowText(hEdit, &text[0], textLength + 1);
+
+            int wordCount = 0;
+            bool inWord = false;
+
+            for (wchar_t c : text) {
+                if (iswspace(c)) {
+                    inWord = false;
+                }
+                else {
+                    if (!inWord) {
+                        wordCount++;
+                        inWord = true;
+                    }
+                }
+            }
+            wordsCount = wordCount;
+            if (hWnd) {
+                SendMessage(hWnd, WM_UPDATE_WORD_COUNT, 0, 0);
+            }
+        }
+
+        Sleep(1000);
+    }
+
+    return 0;
 }
 
 void OnHotkey(HWND hWnd, WPARAM wParam, LPARAM lParam)
@@ -105,8 +164,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
         MessageBox(NULL, L"Не удалось зарегистрировать горячую клавишу!", L"Error", MB_ICONERROR | MB_OK);
         return 1;
     }
-    MSG msg{};
     HWND hWnd{};
+    MSG msg{};
     WNDCLASS wc{ sizeof(WNDCLASS) };
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hInstance;
@@ -126,27 +185,30 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
     wcSearchWindow.hInstance = hInstance;
     wcSearchWindow.hbrBackground = reinterpret_cast<HBRUSH>(GetStockObject(LTGRAY_BRUSH));
     wcSearchWindow.lpszClassName = L"SearchWindowClass";
-  
+
 
     if (!RegisterClass(&wcSearchWindow) || !RegisterClassW(&wc)) {
         return EXIT_FAILURE;
     }
-  
-    if (hWnd = CreateWindow(wc.lpszClassName, L"LAB1", WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, CW_USEDEFAULT, 800, 600, nullptr, nullptr, wc.hInstance, nullptr)) {
+
+    if (hWnd = CreateWindow(wc.lpszClassName, L"LAB1", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, 800, 600, nullptr, nullptr, wc.hInstance, nullptr)) {
         HMENU hMenu = CreateMenu();
         HMENU hFileMenu = CreateMenu();
         AppendMenu(hMenu, MF_POPUP, (UINT_PTR)hFileMenu, L"Файл");
         AppendMenu(hFileMenu, MF_STRING, IDM_OPEN, L"Открыть");
         AppendMenu(hFileMenu, MF_STRING, IDM_SAVE, L"Сохранить");
+        AppendMenu(hFileMenu, MF_STRING, IDM_OPEN_BINARY, L"Открыть бинарный файл");
+        AppendMenu(hFileMenu, MF_STRING, IDM_SAVE_BINARY, L"Сохранить бинарный файл");
+        AppendMenu(hFileMenu, MF_STRING, IDC_START_COUNT, L"Начать счетчик");
+        AppendMenu(hFileMenu, MF_STRING, IDC_STOP_COUNT, L"Закончить счетчик");
         AppendMenu(hFileMenu, MF_SEPARATOR, 0, NULL);
         AppendMenu(hFileMenu, MF_STRING, IDM_EXIT, L"Выход");
         AppendMenu(hFileMenu, MF_SEPARATOR, 0, NULL);
-        AppendMenu(hFileMenu, MF_STRING, IDM_NEW, L"Новый"); 
+        AppendMenu(hFileMenu, MF_STRING, IDM_NEW, L"Новый");
         AppendMenu(hFileMenu, MF_SEPARATOR, 0, NULL);
         AppendMenu(hFileMenu, MF_STRING, IDM_CHANGE_THEME, L"Поменять тему");
         AppendMenu(hFileMenu, MF_STRING, IDM_CHANGE_FONT, L"Изменить шрифт");
         AppendMenu(hMenu, MF_STRING, IDM_SEARCH, L"Поиск");
-
         SetMenu(hWnd, hMenu);
         ShowWindow(hWnd, nCmdShow);
         UpdateWindow(hWnd);
@@ -160,9 +222,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
             }
         }
     }
-
-
-    return EXIT_SUCCESS; 
+    return EXIT_SUCCESS;
 }
 
 LRESULT CALLBACK SearchWindowProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
@@ -198,12 +258,12 @@ LRESULT CALLBACK SearchWindowProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM
 
                 CHARFORMAT2 cf;
                 cf.cbSize = sizeof(cf);
-                cf.dwMask = CFM_BACKCOLOR; 
-                cf.crBackColor = RGB(255, 255, 0); 
+                cf.dwMask = CFM_BACKCOLOR;
+                cf.crBackColor = RGB(255, 255, 0);
 
                 SendMessage(hEdit, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&cf);
 
-          
+
                 searchStartPosition = foundPos + searchQueryLength;
             }
             else
@@ -226,7 +286,7 @@ LRESULT CALLBACK SearchWindowProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM
 
     case WM_DESTROY:
         if (hWnd == hSearchWindow)
-            hSearchWindow = nullptr; 
+            hSearchWindow = nullptr;
         break;
 
     default:
@@ -243,11 +303,108 @@ void ResizeEditControl(HWND hWnd, HWND hEdit)
     SetWindowPos(hEdit, nullptr, 0, 0, clientRect.right, clientRect.bottom, SWP_NOZORDER);
 }
 
+void OpenBinaryFile(LPCTSTR filePath) {
+    if (g_pFileData != NULL) {
+        UnmapViewOfFile(g_pFileData);
+        g_pFileData = NULL;
+    }
+    if (g_hFileMapping != NULL) {
+        CloseHandle(g_hFileMapping);
+        g_hFileMapping = NULL;
+    }
+
+    HANDLE hFile = CreateFile(filePath, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hFile == INVALID_HANDLE_VALUE) {
+        MessageBox(g_hwnd, _T("Failed to open the file"), _T("Error"), MB_ICONERROR);
+        return;
+    }
+
+    g_fileSize = GetFileSize(hFile, NULL);
+
+    g_hFileMapping = CreateFileMapping(hFile, NULL, PAGE_READWRITE, 0, g_fileSize, NULL);
+    if (g_hFileMapping == NULL) {
+        MessageBox(g_hwnd, _T("Failed to create file mapping"), _T("Error"), MB_ICONERROR);
+        CloseHandle(hFile);
+        return;
+    }
+
+    g_pFileData = MapViewOfFile(g_hFileMapping, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, g_fileSize);
+    if (g_pFileData == NULL) {
+        MessageBox(g_hwnd, _T("Failed to map the file into memory"), _T("Error"), MB_ICONERROR);
+        CloseHandle(g_hFileMapping);
+        g_hFileMapping = NULL;
+        CloseHandle(hFile);
+        return;
+    }
+}
+LPCWSTR AsciiToHex(const WCHAR* asciiString) {
+    std::wstringstream resultStream;
+
+    for (size_t i = 0; i < wcslen(asciiString); ++i) {
+        int asciiValue = static_cast<int>(asciiString[i]);
+        resultStream << std::hex << std::setw(2) << std::setfill(L'0') << asciiValue;
+        if (i < wcslen(asciiString) - 1) {
+            resultStream << L' ';
+        }
+    }
+
+    std::wstring result = resultStream.str();
+    LPCWSTR resultStr = _wcsdup(result.c_str());
+
+    return resultStr;
+}
+void StopWordCountThread() {
+    g_bIsWordCountThreadRunning = false;
+    if (hThread != nullptr) {
+        WaitForSingleObject(hThread, INFINITE);
+        CloseHandle(hThread);
+        hThread = nullptr;
+    }
+}
+
+LPCWSTR HexToAsciiString(const WCHAR* hexString) {
+    std::wstringstream resultStream;
+
+    std::wistringstream hexStream(hexString);
+    std::wstring hexByte;
+    while (hexStream >> hexByte) {
+        int number = 0;
+        std::wstringstream hexConverter;
+        hexConverter << std::hex << hexByte;
+        hexConverter >> number;
+
+        WCHAR asciiChar = static_cast<WCHAR>(number);
+        resultStream << asciiChar;
+    }
+
+    std::wstring result = resultStream.str();
+    LPCWSTR resultStr = _wcsdup(result.c_str());
+
+    return resultStr;
+}
+
+void SaveHexToFile(LPCTSTR filePath, const std::wstring& hexString) {
+    if (g_hFileMapping != NULL) {
+        CloseHandle(g_hFileMapping);
+        g_hFileMapping = NULL;
+
+        HANDLE hFile = CreateFile(filePath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+
+        if (hFile != INVALID_HANDLE_VALUE) {
+            DWORD bytesWritten;
+            WriteFile(hFile, hexString.c_str(), static_cast<DWORD>(hexString.size() * sizeof(WCHAR)), &bytesWritten, NULL);
+            CloseHandle(hFile);
+        }
+    }
+}
+
 LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
-{
-    
+{   
     static wchar_t currentFileName[MAX_PATH] = L"";
+
+    HWND hButtonContainer = nullptr;
     
+    HWND hStartWordCountButton = nullptr;
     switch (message)
     {
     case WM_CREATE:
@@ -255,27 +412,27 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         LoadLibrary(TEXT("Msftedit.dll"));
         hEdit = CreateWindowEx(
             WS_EX_CLIENTEDGE,
-            RICHEDIT_CLASS,  
+            RICHEDIT_CLASS,
             L"",
             WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL | ES_MULTILINE | ES_AUTOVSCROLL | ES_AUTOHSCROLL | ES_NOHIDESEL,
-            0, 0, 800, 600,
+            0, 0, 800, 500, 
             hWnd,
             nullptr,
             GetModuleHandle(nullptr),
             nullptr
         );
-
         if (hEdit == nullptr)
         {
             MessageBox(hWnd, L"Не удалось создать элемент управления Edit.", L"Ошибка", MB_OK | MB_ICONERROR);
         }
-    }
-    break;
-
-    case WM_SIZE:
-        ResizeEditControl(hWnd, hEdit);
         break;
+    }   
+    case WM_UPDATE_WORD_COUNT: {
+        std::wstring labelText = L"Количество слов: " + std::to_wstring(wordsCount);
+        SetWindowText(hWnd, labelText.c_str());
 
+        break;
+    }
     case WM_COMMAND:
         switch (LOWORD(wParam))
         {
@@ -412,14 +569,94 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             }
             break;
         }
+       
+        case IDM_OPEN_BINARY: {
+            OPENFILENAME ofn = { 0 };
+            TCHAR filePath[MAX_PATH] = { 0 };
 
+            ofn.lStructSize = sizeof(OPENFILENAME);
+            ofn.hwndOwner = hWnd;
+            ofn.lpstrFile = filePath;
+            ofn.nMaxFile = MAX_PATH;
+            ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+            ofn.lpstrFilter = L"Binary Files\0*.bin\0All Files\0*.*\0";
+            ofn.lpstrDefExt = L"bin";
+            if (GetOpenFileName(&ofn)) {
+                OpenBinaryFile(filePath);
+                int requiredBufferSize = MultiByteToWideChar(CP_UTF8, 0, (LPCCH)g_pFileData, -1, NULL, 0);
+                if (requiredBufferSize > 0) {
+                    WCHAR* utf16Text = new WCHAR[requiredBufferSize];
+                    MultiByteToWideChar(CP_UTF8, 0, (LPCCH)g_pFileData, -1, utf16Text, requiredBufferSize);
+                    LPCWSTR text = HexToAsciiString(utf16Text);
+
+                    SetWindowText(hEdit, text);
+
+                    delete[] utf16Text;
+                }
+                lstrcpy(currentFileName, filePath);
+
+            }
+            break;
+        }
+        case IDM_SAVE_BINARY: {
+            if (g_hFileMapping != NULL) {
+                OPENFILENAME ofn = { 0 };
+                ofn.lStructSize = sizeof(OPENFILENAME);
+                ofn.hwndOwner = hWnd;
+                ofn.lpstrFile = currentFileName;
+                ofn.nMaxFile = MAX_PATH;
+                ofn.Flags = OFN_OVERWRITEPROMPT;
+
+                ofn.lpstrFilter = L"Binary Files\0*.bin\0All Files\0*.*\0";
+                ofn.lpstrDefExt = L"bin";
+
+                if (GetSaveFileName(&ofn)) {
+                    int textLength = GetWindowTextLength(hEdit);
+                    std::wstring text;
+                    if (textLength > 0) {
+                        text.resize(textLength);
+                        GetWindowText(hEdit, &text[0], textLength + 1);
+                    }
+                    std::wstring hexString = AsciiToHex(text.c_str());
+                    SaveHexToFile(currentFileName, hexString);
+                }
+            }
+            break;
+        }
         case IDM_SEARCH:
             OpenSearchWindow(hWnd);
             break;
+       
+        case IDC_START_COUNT: {
+            ThreadParams threadParams;
+            threadParams.hWnd = hWnd;
 
-        case WM_CLOSE:
-            CloseWindow(hWnd);
+            hThread = CreateThread(nullptr, 0, WordCountThread, &threadParams, CREATE_SUSPENDED, nullptr);
+            if (hThread == nullptr) {
+                MessageBox(hWnd, L"Не удалось запустить поток.", L"Ошибка", MB_OK | MB_ICONERROR);
+            }
+            if (SetThreadPriority(hThread, THREAD_PRIORITY_ABOVE_NORMAL) == 0) {
+                MessageBox(hWnd, L"Не удалось назначить приоритет потоку.", L"Ошибка", MB_OK | MB_ICONERROR);
+            }
+            ResumeThread(hThread);
+
             break;
+        }
+
+        case IDC_STOP_COUNT: {
+            StopWordCountThread();
+            break;
+        }
+
+        case WM_CLOSE: {
+            if (hThread != nullptr) {
+                TerminateThread(hThread, 0);
+                CloseHandle(hThread);
+            }
+            DestroyWindow(hWnd);
+            break;
+        }
+
 
         case IDM_EXIT:
             PostQuitMessage(0);
@@ -427,7 +664,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         }
         break;
 
+       
     case WM_DESTROY:
+
         PostQuitMessage(0);
         break;
 
