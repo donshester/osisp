@@ -1,13 +1,4 @@
-#include <windows.h>
-#include <richedit.h> 
-#include <string>
-#include <sstream>
-#include <iomanip>
-#include <vector>
-#include <tchar.h>
-#include "Richedit.h"
-#include "commctrl.h"
-#include <iostream>
+#include "imports.h";
 #define RICHEDIT_CLASS L"RICHEDIT50W"
 #define IDM_OPEN  1001
 #define IDM_SAVE  1002
@@ -25,6 +16,14 @@
 #define WM_UPDATE_WORD_COUNT 6
 #define IDC_STOP_COUNT 5
 #define HOTKEY_ID 1
+#define IDM_REGISTRY_ACCESS 1999
+#define IDC_READ_BUTTON 2999
+#define IDC_RESULT_EDIT 3999
+#define IDC_CHAT_LIST 3991
+#define OPEN_CHAT 4999
+#define IDC_LISTVIEW 5999
+#define IDC_SEND_FILE_BUTTON 5991
+#define IDM_SEND_FILE 5191
 
 LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
 LRESULT CALLBACK SearchWindowProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
@@ -34,15 +33,148 @@ static HWND hSearchEdit = nullptr;
 static int searchStartPosition = 0;
 static HWND hSearchWindow = nullptr;
 HWND g_hwnd;
+std::vector<char> g_content;
 HANDLE g_hFileMapping;
 LPVOID g_pFileData;
 DWORD g_fileSize;
 bool g_bIsWordCountThreadRunning = true;
 HANDLE hThread = nullptr;
 UINT_PTR timerId;
+HANDLE g_hFileMutex;
+HANDLE g_hRegistryMutex;
+CRITICAL_SECTION g_csWordCount;
+WSADATA wsaData;
+sockaddr_in serverAddr;
+HWND hwndChatWindow;
+HWND hChatsListBox;
+HANDLE chatThread;
+HWND g_hWndSettings;
+
+SOCKET g_socket = 0;
+
+
+LRESULT CALLBACK RegistryAccessWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    switch (message)
+    {
+    case WM_CREATE:
+        CreateWindow(L"BUTTON", L"Чтение", WS_VISIBLE | WS_CHILD | BS_DEFPUSHBUTTON,
+            10, 10, 80, 30, hWnd, (HMENU)IDC_READ_BUTTON, GetModuleHandle(NULL), NULL);
+
+        CreateWindow(L"EDIT", L"", WS_VISIBLE | WS_CHILD | ES_READONLY | WS_BORDER,
+            100, 10, 200, 30, hWnd, (HMENU)IDC_RESULT_EDIT, GetModuleHandle(NULL), NULL);
+        break;
+
+    case WM_COMMAND:
+        switch (LOWORD(wParam))
+        {
+        case IDC_READ_BUTTON:
+        {
+            HKEY hKey; 
+            LONG result = RegOpenKeyEx(HKEY_LOCAL_MACHINE, L"SOFTWARE\\YourRegistryKey", 0, KEY_READ, &hKey);
+
+            if (result == ERROR_SUCCESS)
+            {
+                WCHAR valueData[256];
+                DWORD valueSize = sizeof(valueData);
+
+                result = RegQueryValueEx(hKey, L"YourRegistryValue", 0, NULL, (LPBYTE)valueData, &valueSize);
+
+                if (result == ERROR_SUCCESS)
+                {
+                    SetDlgItemText(hWnd, IDC_RESULT_EDIT, valueData);
+                }
+                else
+                {
+                    SetDlgItemText(hWnd, IDC_RESULT_EDIT, L"Ошибка чтения значения из реестра");
+                }
+
+                RegCloseKey(hKey);
+            }
+            else
+            {
+                SetDlgItemText(hWnd, IDC_RESULT_EDIT, L"Ошибка открытия ключа в реестре");
+            }
+            break;
+        }
+        }
+
+    case WM_CLOSE:
+        DestroyWindow(hWnd);
+        break;
+
+
+    default:
+        return DefWindowProc(hWnd, message, wParam, lParam);
+    }
+
+    return 0;
+}
+void LoadFontSettings()
+{
+    WaitForSingleObject(g_hRegistryMutex, INFINITE);
+
+    HKEY hKey;
+    if (RegOpenKeyEx(HKEY_CURRENT_USER, L"Software\\322EDITOR322\\FontSettings", 0, KEY_READ, &hKey) == ERROR_SUCCESS)
+    {
+        LOGFONT lf = { 0 };
+
+        DWORD dataSize;
+        DWORD fontUnderline, fontStrikeOut, fontItalic, fontBold;
+
+        dataSize = sizeof(DWORD);
+        RegQueryValueEx(hKey, L"FontUnderline", 0, NULL, (LPBYTE)&fontUnderline, &dataSize);
+
+        dataSize = sizeof(DWORD);
+        RegQueryValueEx(hKey, L"FontStrikeOut", 0, NULL, (LPBYTE)&fontStrikeOut, &dataSize);
+
+        dataSize = sizeof(DWORD);
+        RegQueryValueEx(hKey, L"FontItalic", 0, NULL, (LPBYTE)&fontItalic, &dataSize);
+
+        dataSize = sizeof(DWORD);
+        RegQueryValueEx(hKey, L"FontBold", 0, NULL, (LPBYTE)&fontBold, &dataSize);
+
+        dataSize = sizeof(wchar_t) * MAX_PATH;
+        RegQueryValueEx(hKey, L"FontName", 0, NULL, (LPBYTE)lf.lfFaceName, &dataSize);
+
+        dataSize = sizeof(DWORD);
+        RegQueryValueEx(hKey, L"FontSize", 0, NULL, (LPBYTE)&lf.lfHeight, &dataSize);
+
+        RegCloseKey(hKey);
+
+        lf.lfUnderline = fontUnderline;
+        lf.lfStrikeOut = fontStrikeOut;
+        lf.lfItalic = fontItalic;
+        lf.lfWeight = fontBold;
+
+        HFONT hFont = CreateFontIndirect(&lf);
+        SendMessage(hEdit, WM_SETFONT, (WPARAM)hFont, TRUE);
+    }
+
+    ReleaseMutex(g_hRegistryMutex);
+}
+void LoadColorSettings()
+{
+    WaitForSingleObject(g_hRegistryMutex, INFINITE);
+
+    HKEY hKey;
+    if (RegOpenKeyEx(HKEY_CURRENT_USER, L"Software\\322EDITOR322\\ColorSettings", 0, KEY_READ, &hKey) == ERROR_SUCCESS)
+    {
+        DWORD dataSize;
+        DWORD backgroundColor;
+
+        dataSize = sizeof(DWORD);
+        RegQueryValueEx(hKey, L"BackgroundColor", 0, NULL, (LPBYTE)&backgroundColor, &dataSize);
+
+        RegCloseKey(hKey);
+
+        SendMessage(hEdit, EM_SETBKGNDCOLOR, FALSE, backgroundColor);
+    }
+
+    ReleaseMutex(g_hRegistryMutex);
+}
 struct ThreadParams {
     HWND hWnd;
-    // Другие параметры, если необходимо
 };
 void OpenSearchWindow(HWND hWnd)
 {
@@ -95,7 +227,6 @@ void OpenSearchWindow(HWND hWnd)
         MessageBox(hWnd, L"Не удалось создать окно поиска.", L"Ошибка", MB_OK | MB_ICONERROR);
     }
 }
-
 DWORD WINAPI WordCountThread(LPVOID lpParam) {
     ThreadParams* params = reinterpret_cast<ThreadParams*>(lpParam);
     HWND hWnd = params->hWnd;
@@ -111,6 +242,8 @@ DWORD WINAPI WordCountThread(LPVOID lpParam) {
             int wordCount = 0;
             bool inWord = false;
 
+            EnterCriticalSection(&g_csWordCount);
+
             for (wchar_t c : text) {
                 if (iswspace(c)) {
                     inWord = false;
@@ -123,17 +256,18 @@ DWORD WINAPI WordCountThread(LPVOID lpParam) {
                 }
             }
             wordsCount = wordCount;
+
+            LeaveCriticalSection(&g_csWordCount);
+
             if (hWnd) {
                 SendMessage(hWnd, WM_UPDATE_WORD_COUNT, 0, 0);
             }
         }
-
         Sleep(1000);
     }
 
     return 0;
 }
-
 void OnHotkey(HWND hWnd, WPARAM wParam, LPARAM lParam)
 {
     if (wParam == HOTKEY_ID)
@@ -141,7 +275,15 @@ void OnHotkey(HWND hWnd, WPARAM wParam, LPARAM lParam)
         OpenSearchWindow(hWnd);
     }
 }
-
+void SaveColorSettings(COLORREF color)
+{
+    HKEY hKey;
+    if (RegCreateKeyEx(HKEY_CURRENT_USER, L"Software\\322EDITOR322\\ColorSettings", 0, NULL, 0, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS)
+    {
+        RegSetValueEx(hKey, L"BackgroundColor", 0, REG_DWORD, (LPBYTE)&color, sizeof(DWORD));
+        RegCloseKey(hKey);
+    }
+}
 void OpenColorDialog()
 {
     CHOOSECOLOR cc = { sizeof(CHOOSECOLOR) };
@@ -152,18 +294,285 @@ void OpenColorDialog()
     if (ChooseColor(&cc))
     {
         SendMessage(hEdit, EM_SETBKGNDCOLOR, FALSE, cc.rgbResult);
+        SaveColorSettings(cc.rgbResult);
     }
 }
 
 
 
+
+
+
+LRESULT CALLBACK ChatProc(HWND hWindow, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    switch (msg)
+    {
+    case WM_COMMAND:
+        switch (LOWORD(wParam))
+        {
+        case WM_CLOSE:
+            if (hWindow == g_hWndSettings) {
+                Package p = {Operation::Close, 0, 0 };
+                send(g_socket, reinterpret_cast<char*>(&p), sizeof(Package), NULL);
+                closesocket(g_socket);
+                DestroyWindow(hWindow);
+            }
+            break;
+        }
+        break;
+    case WM_DESTROY:
+        if (hWindow == g_hWndSettings) {
+            g_hWndSettings = nullptr;
+        }
+        break;
+    case WM_NOTIFY:
+    {
+        NMHDR* nmh = reinterpret_cast<NMHDR*>(lParam);
+        if (nmh->code == NM_DBLCLK) {
+            NMLISTVIEW* pNmlv = reinterpret_cast<NMLISTVIEW*>(nmh);
+            int selectedIndex = pNmlv->iItem;
+
+            WCHAR buffer[MAX_PATH];
+            LVITEM lvItem;
+            lvItem.iItem = selectedIndex;
+            lvItem.iSubItem = 0;
+            lvItem.pszText = buffer;
+            lvItem.cchTextMax = MAX_PATH;
+
+            SendMessage(pNmlv->hdr.hwndFrom, LVM_GETITEMTEXT, selectedIndex, reinterpret_cast<LPARAM>(&lvItem));
+
+            int itemId = std::stoi(buffer);
+            if (itemId != -1) {
+                OPENFILENAME ofn;
+                wchar_t szFileName[1024] = L"";
+
+                ZeroMemory(&ofn, sizeof(ofn));
+                ofn.lStructSize = sizeof(ofn);
+                ofn.hwndOwner = NULL;
+                ofn.lpstrFilter = L"Text Files\0*.txt\0All Files\0*.*\0";
+                ofn.lpstrFile = szFileName;
+                ofn.nMaxFile = MAX_PATH;
+                ofn.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
+
+                if (GetOpenFileName(&ofn) == TRUE)
+                {
+                    HANDLE hFile = CreateFileW(szFileName, GENERIC_READ, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+                    DWORD fSize = GetFileSize(hFile, NULL);
+                    if (hFile != INVALID_HANDLE_VALUE) {
+                        if (fSize == INVALID_FILE_SIZE && GetLastError() != NO_ERROR) {
+                            CloseHandle(hFile);
+                            return false;
+                        }
+                        g_content.resize(fSize + 1);
+                        DWORD bytesRead;
+                        if (ReadFile(hFile, g_content.data(), fSize, &bytesRead, NULL)) {
+                            g_content[bytesRead] = '\0';
+                        }
+                        else {
+                            return false;
+                        }
+                        CloseHandle(hFile);
+                    }
+                    else {
+                        return false;
+                    }
+
+                    std::wstring name = szFileName;
+
+                    name = name.substr(name.find_last_of('\\') + 1);
+                    LPWSTR fName = const_cast<LPWSTR>(name.data());
+                    name = fName;
+                    Package pack{ Operation::Send, name.size(), itemId };
+                    send(g_socket, reinterpret_cast<char*>(&pack), sizeof(Package), NULL);
+                    send(g_socket, reinterpret_cast<char*>(const_cast<wchar_t*>(name.c_str())), name.size() * sizeof(wchar_t), NULL);
+                    send(g_socket, reinterpret_cast<char*>(&fSize), sizeof(int), NULL);
+                    send(g_socket, g_content.data(), fSize * sizeof(char), NULL);
+                }
+            }
+        }
+        else if (nmh->code == NM_RCLICK) {
+            NMLISTVIEW* pNmlv = reinterpret_cast<NMLISTVIEW*>(nmh);
+            int selectedItemIndex = pNmlv->iItem;
+
+            if (selectedItemIndex >= 0) {
+                POINT pt;
+                GetCursorPos(&pt);
+
+                HMENU hPopupMenu = CreatePopupMenu();
+                AppendMenu(hPopupMenu, MF_STRING, IDM_SEND_FILE, L"Send File");
+
+                TrackPopupMenu(hPopupMenu, TPM_LEFTALIGN | TPM_TOPALIGN, pt.x, pt.y, 0, hwndChatWindow, NULL);
+
+                DestroyMenu(hPopupMenu);
+            }
+        }
+        break;
+    }
+    default:
+        return DefWindowProc(hWindow, msg, wParam, lParam);
+    }
+    return 0;
+}
+void ProcessChatThread()
+{
+    int op;
+    int sz;
+    while (true)
+    {
+        Package p;
+        int bytes = recv(g_socket, reinterpret_cast<char*>(&p), sizeof(Package), NULL);
+        switch (p.operation)
+        {
+        case Operation::Send:
+        {
+            std::wstring fName;
+            fName.resize(p.data * sizeof(wchar_t));
+            recv(g_socket, reinterpret_cast<char*>(const_cast<wchar_t*>(fName.data())), p.data * sizeof(wchar_t), NULL);
+            std::wstring msg = L"File received: " + fName; 
+            int result = MessageBox(NULL, msg.c_str(), L"File received", MB_OKCANCEL | MB_ICONQUESTION);
+
+            if (result == IDOK) {
+                BROWSEINFO bi = { 0 };
+                bi.hwndOwner = hwndChatWindow;
+                bi.lpszTitle = L"Choose folder:";
+                bi.ulFlags = BIF_NEWDIALOGSTYLE | BIF_RETURNONLYFSDIRS;
+                LPITEMIDLIST pidl = SHBrowseForFolder(&bi);
+
+                if (pidl != NULL)
+                {
+                    wchar_t folderPath[MAX_PATH];
+                    SHGetPathFromIDList(pidl, folderPath);
+                    int size;
+                    std::string data;
+                    recv(g_socket, reinterpret_cast<char*>(&size), sizeof(int), NULL);
+                    data.resize(size);
+                    recv(g_socket, const_cast<char*>(data.data()), size * sizeof(char), NULL);
+                    std::wstring path = folderPath;
+                    path += L"\\" + fName;
+                    std::vector<char> cont(data.begin(), data.end());
+                    HANDLE hFile = CreateFileW(path.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+
+                    if (hFile == INVALID_HANDLE_VALUE)
+                    {
+                        OutputDebugString(L"Unable to open file");
+                    }
+                    LPDWORD byteRead = 0;
+                    if (!WriteFile(hFile, cont.data(), size, byteRead, NULL))
+                    {
+                        OutputDebugString(L"Unable to async write");
+                        CloseHandle(hFile);
+                        break;
+                    }
+                    CloseHandle(hFile);
+                }
+            }
+        }
+        break;
+        case Operation::Update:
+        {
+            if (p.data > 0)
+            {
+                std::vector<int> receivedData;
+                int currentId;
+                recv(g_socket, reinterpret_cast<char*>(&currentId), sizeof(int), 0);
+                std::vector<char> buffer(p.data * sizeof(int));
+                int bytesRead = recv(g_socket, buffer.data(), buffer.size(), 0);
+
+                if (bytesRead > 0) {
+                    receivedData.resize(bytesRead / sizeof(int));
+                    memcpy(receivedData.data(), buffer.data(), bytesRead);
+                }
+                else {
+                    break;
+                }
+
+                if (hChatsListBox != NULL) {
+                    SendMessage(hChatsListBox, LB_RESETCONTENT, 0, 0);
+                }
+
+                for (size_t i = 0; i < receivedData.size(); i++)
+                {
+                    if (hChatsListBox != NULL && currentId != i) {
+                        LVITEM lvi;
+                        lvi.mask = LVIF_TEXT;
+
+                        lvi.iItem = i;
+                        lvi.iSubItem = 0;
+                        std::wstring text = std::to_wstring(receivedData[i]);
+                        lvi.pszText = const_cast<LPWSTR>(text.c_str());
+                        ListView_InsertItem(hChatsListBox, &lvi);
+                    }
+                }
+            }
+        }
+        break;
+        default:
+            break;
+        }
+    }
+}
+void InitiateConnection(HWND windowHandle)
+{
+    if (WSAStartup(MAKEWORD(2, 1), &wsaData) != 0) {
+        OutputDebugString(L"WSAStartup failed.");
+        return;
+    }
+
+    sockaddr_in serverAddr;
+    int serverAddrSize = sizeof(serverAddr);
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_port = htons(1111);
+    inet_pton(AF_INET, "127.0.0.1", &serverAddr.sin_addr);
+
+    g_socket = socket(AF_INET, SOCK_STREAM, 0);
+    if (g_socket == INVALID_SOCKET) {
+        OutputDebugString(L"Failed to create socket.");
+        return;
+    }
+
+    if (connect(g_socket, reinterpret_cast<sockaddr*>(&serverAddr), sizeof(serverAddr)) == SOCKET_ERROR) {
+        OutputDebugString(L"Connection failed.");
+        closesocket(g_socket);
+        WSACleanup();
+        return;
+    }
+
+    hwndChatWindow = CreateWindow(L"ChatWindowClass", L"Chat Window", WS_OVERLAPPEDWINDOW,
+        CW_USEDEFAULT, CW_USEDEFAULT, 600, 600, nullptr, nullptr, nullptr, nullptr);
+
+    hChatsListBox = CreateWindowEx(0, WC_LISTVIEW, NULL,
+        WS_CHILD | WS_VISIBLE | LVS_REPORT | LVS_EDITLABELS,
+        0, 0, 600, 600, hwndChatWindow, reinterpret_cast<HMENU>(IDC_CHAT_LIST), NULL, NULL);
+
+    LVCOLUMN lvColumn;
+    lvColumn.mask = LVCF_WIDTH | LVCF_TEXT;
+    lvColumn.cx = 600;
+    lvColumn.pszText = const_cast<LPWSTR>(L"Номер клиента");
+    ListView_InsertColumn(hChatsListBox, 0, &lvColumn);
+
+    chatThread = CreateThread(NULL, NULL, reinterpret_cast<LPTHREAD_START_ROUTINE>(ProcessChatThread), NULL, NULL, NULL);
+
+    ShowWindow(hwndChatWindow, SW_SHOWNORMAL);
+}
+
+
+
+
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine, int nCmdShow)
 {
-    if (!RegisterHotKey(NULL, HOTKEY_ID, MOD_CONTROL, 'F'))
-    {
-        MessageBox(NULL, L"Не удалось зарегистрировать горячую клавишу!", L"Error", MB_ICONERROR | MB_OK);
+    g_hFileMutex = CreateMutex(NULL, FALSE, L"FileMutex");
+    if (g_hFileMutex == NULL) {
+        MessageBox(NULL, L"Не удалось создать мьютекс для ресурсов!", L"Error", MB_ICONERROR | MB_OK);
         return 1;
     }
+    g_hRegistryMutex = CreateMutex(NULL, FALSE, L"RegistryMutex");
+    if (g_hRegistryMutex == NULL) {
+        MessageBox(NULL, L"Не удалось создать мьютекс для реестра!", L"Error", MB_ICONERROR | MB_OK);
+        return 1;
+    }
+    InitializeCriticalSection(&g_csWordCount);
+
+   
     HWND hWnd{};
     MSG msg{};
     WNDCLASS wc{ sizeof(WNDCLASS) };
@@ -185,12 +594,20 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
     wcSearchWindow.hInstance = hInstance;
     wcSearchWindow.hbrBackground = reinterpret_cast<HBRUSH>(GetStockObject(LTGRAY_BRUSH));
     wcSearchWindow.lpszClassName = L"SearchWindowClass";
+    WNDCLASSEXW wcChatWindow{ sizeof(WNDCLASSEX) };
+
+    wcChatWindow.lpfnWndProc = ChatProc;
+    wcChatWindow.hInstance = hInstance;
+    wcChatWindow.hbrBackground = reinterpret_cast<HBRUSH>(GetStockObject(LTGRAY_BRUSH));
+    wcChatWindow.lpszClassName = L"ChatWindowClass";
+    RegisterClassExW(&wcChatWindow);
 
 
     if (!RegisterClass(&wcSearchWindow) || !RegisterClassW(&wc)) {
+        CloseHandle(g_hFileMutex);
         return EXIT_FAILURE;
     }
-
+    LoadFontSettings();
     if (hWnd = CreateWindow(wc.lpszClassName, L"LAB1", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT, 800, 600, nullptr, nullptr, wc.hInstance, nullptr)) {
         HMENU hMenu = CreateMenu();
         HMENU hFileMenu = CreateMenu();
@@ -208,7 +625,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
         AppendMenu(hFileMenu, MF_SEPARATOR, 0, NULL);
         AppendMenu(hFileMenu, MF_STRING, IDM_CHANGE_THEME, L"Поменять тему");
         AppendMenu(hFileMenu, MF_STRING, IDM_CHANGE_FONT, L"Изменить шрифт");
+        AppendMenu(hFileMenu, MF_STRING, IDM_REGISTRY_ACCESS, L"Открыть реестр");
         AppendMenu(hMenu, MF_STRING, IDM_SEARCH, L"Поиск");
+        AppendMenu(hMenu, MF_STRING, OPEN_CHAT, L"Открыть чат");
+
         SetMenu(hWnd, hMenu);
         ShowWindow(hWnd, nCmdShow);
         UpdateWindow(hWnd);
@@ -222,9 +642,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR lpCmdLine,
             }
         }
     }
+    closesocket(g_socket);
+
     return EXIT_SUCCESS;
 }
-
 LRESULT CALLBACK SearchWindowProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
     switch (message)
@@ -294,16 +715,15 @@ LRESULT CALLBACK SearchWindowProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM
     }
     return 0;
 }
-
-
 void ResizeEditControl(HWND hWnd, HWND hEdit)
 {
     RECT clientRect;
     GetClientRect(hWnd, &clientRect);
     SetWindowPos(hEdit, nullptr, 0, 0, clientRect.right, clientRect.bottom, SWP_NOZORDER);
 }
-
 void OpenBinaryFile(LPCTSTR filePath) {
+    WaitForSingleObject(g_hFileMutex, INFINITE);
+
     if (g_pFileData != NULL) {
         UnmapViewOfFile(g_pFileData);
         g_pFileData = NULL;
@@ -317,6 +737,7 @@ void OpenBinaryFile(LPCTSTR filePath) {
     if (hFile == INVALID_HANDLE_VALUE) {
         MessageBox(g_hwnd, _T("Failed to open the file"), _T("Error"), MB_ICONERROR);
         return;
+        ReleaseMutex(g_hFileMutex);
     }
 
     g_fileSize = GetFileSize(hFile, NULL);
@@ -325,6 +746,7 @@ void OpenBinaryFile(LPCTSTR filePath) {
     if (g_hFileMapping == NULL) {
         MessageBox(g_hwnd, _T("Failed to create file mapping"), _T("Error"), MB_ICONERROR);
         CloseHandle(hFile);
+        ReleaseMutex(g_hFileMutex);
         return;
     }
 
@@ -334,24 +756,10 @@ void OpenBinaryFile(LPCTSTR filePath) {
         CloseHandle(g_hFileMapping);
         g_hFileMapping = NULL;
         CloseHandle(hFile);
+        ReleaseMutex(g_hFileMutex);
         return;
     }
-}
-LPCWSTR AsciiToHex(const WCHAR* asciiString) {
-    std::wstringstream resultStream;
-
-    for (size_t i = 0; i < wcslen(asciiString); ++i) {
-        int asciiValue = static_cast<int>(asciiString[i]);
-        resultStream << std::hex << std::setw(2) << std::setfill(L'0') << asciiValue;
-        if (i < wcslen(asciiString) - 1) {
-            resultStream << L' ';
-        }
-    }
-
-    std::wstring result = resultStream.str();
-    LPCWSTR resultStr = _wcsdup(result.c_str());
-
-    return resultStr;
+    ReleaseMutex(g_hFileMutex);
 }
 void StopWordCountThread() {
     g_bIsWordCountThreadRunning = false;
@@ -361,28 +769,6 @@ void StopWordCountThread() {
         hThread = nullptr;
     }
 }
-
-LPCWSTR HexToAsciiString(const WCHAR* hexString) {
-    std::wstringstream resultStream;
-
-    std::wistringstream hexStream(hexString);
-    std::wstring hexByte;
-    while (hexStream >> hexByte) {
-        int number = 0;
-        std::wstringstream hexConverter;
-        hexConverter << std::hex << hexByte;
-        hexConverter >> number;
-
-        WCHAR asciiChar = static_cast<WCHAR>(number);
-        resultStream << asciiChar;
-    }
-
-    std::wstring result = resultStream.str();
-    LPCWSTR resultStr = _wcsdup(result.c_str());
-
-    return resultStr;
-}
-
 void SaveHexToFile(LPCTSTR filePath, const std::wstring& hexString) {
     if (g_hFileMapping != NULL) {
         CloseHandle(g_hFileMapping);
@@ -397,7 +783,49 @@ void SaveHexToFile(LPCTSTR filePath, const std::wstring& hexString) {
         }
     }
 }
+void OpenRegistryAccessWindow(HWND hWnd)
+{
+    WCHAR szClassName[] = L"RegistryAccessWindowClass";
 
+    WNDCLASS wc = { 0 };
+    wc.lpfnWndProc = RegistryAccessWndProc; 
+    wc.hInstance = GetModuleHandle(NULL);
+    wc.lpszClassName = szClassName;
+
+    if (!RegisterClass(&wc))
+    {
+        DWORD dwError = GetLastError();
+        wchar_t errorMessage[256];
+        swprintf(errorMessage, 256, L"Ошибка при регистрации класса окна. Код ошибки: %lu", dwError);
+        MessageBox(NULL, errorMessage, L"Ошибка", MB_OK | MB_ICONERROR);
+    }
+    else
+    {
+        HWND hRegistryAccessWindow = CreateWindow(
+            szClassName, 
+            L"Registry Access",
+            WS_OVERLAPPEDWINDOW,
+            CW_USEDEFAULT, CW_USEDEFAULT, 400, 200,
+            nullptr,
+            nullptr,
+            GetModuleHandle(nullptr),
+            nullptr
+        );
+
+        if (hRegistryAccessWindow != nullptr)
+        {
+            ShowWindow(hRegistryAccessWindow, SW_SHOWNORMAL);
+        }
+        else
+        {
+            DWORD dwError = GetLastError();
+            wchar_t errorMessage[256];
+            swprintf(errorMessage, 256, L"Произошла ошибка при создании окна. Код ошибки: %lu", dwError);
+            MessageBox(NULL, errorMessage, L"Ошибка", MB_OK | MB_ICONERROR);
+        }
+    }
+
+}
 LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 {   
     static wchar_t currentFileName[MAX_PATH] = L"";
@@ -421,21 +849,32 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             GetModuleHandle(nullptr),
             nullptr
         );
+        LoadFontSettings();
+        LoadColorSettings();
         if (hEdit == nullptr)
         {
             MessageBox(hWnd, L"Не удалось создать элемент управления Edit.", L"Ошибка", MB_OK | MB_ICONERROR);
         }
+
         break;
     }   
     case WM_UPDATE_WORD_COUNT: {
         std::wstring labelText = L"Количество слов: " + std::to_wstring(wordsCount);
         SetWindowText(hWnd, labelText.c_str());
-
         break;
     }
+    case WM_SIZE:
+        ResizeEditControl(hWnd, hEdit);
+        break;
     case WM_COMMAND:
         switch (LOWORD(wParam))
         {
+        case OPEN_CHAT:
+            InitiateConnection(hWnd);
+            break;
+        case IDM_REGISTRY_ACCESS:
+            OpenRegistryAccessWindow(hWnd);
+            break;
         case IDM_CHANGE_THEME:
             OpenColorDialog();
             break;
@@ -451,6 +890,18 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             {
                 HFONT hFont = CreateFontIndirect(&lf);
                 SendMessage(hEdit, WM_SETFONT, (WPARAM)hFont, TRUE);
+
+                HKEY hKey;
+                if (RegCreateKeyEx(HKEY_CURRENT_USER, L"Software\\322EDITOR322\\FontSettings", 0, NULL, 0, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS)
+                {
+                    RegSetValueEx(hKey, L"FontName", 0, REG_SZ, (LPBYTE)lf.lfFaceName, sizeof(wchar_t) * (wcslen(lf.lfFaceName) + 1));
+                    RegSetValueEx(hKey, L"FontSize", 0, REG_DWORD, (LPBYTE)&lf.lfHeight, sizeof(DWORD));
+                    RegSetValueEx(hKey, L"FontUnderline", 0, REG_DWORD, (LPBYTE)&lf.lfUnderline, sizeof(DWORD));
+                    RegSetValueEx(hKey, L"FontStrikeOut", 0, REG_DWORD, (LPBYTE)&lf.lfStrikeOut, sizeof(DWORD));
+                    RegSetValueEx(hKey, L"FontItalic", 0, REG_DWORD, (LPBYTE)&lf.lfItalic, sizeof(DWORD));
+                    RegSetValueEx(hKey, L"FontBold", 0, REG_DWORD, (LPBYTE)&lf.lfWeight, sizeof(DWORD));
+                    RegCloseKey(hKey);
+                }
             }
             break;
         }
@@ -587,7 +1038,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                 if (requiredBufferSize > 0) {
                     WCHAR* utf16Text = new WCHAR[requiredBufferSize];
                     MultiByteToWideChar(CP_UTF8, 0, (LPCCH)g_pFileData, -1, utf16Text, requiredBufferSize);
-                    LPCWSTR text = HexToAsciiString(utf16Text);
+                    LPCWSTR text = utf16Text;
 
                     SetWindowText(hEdit, text);
 
@@ -617,7 +1068,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
                         text.resize(textLength);
                         GetWindowText(hEdit, &text[0], textLength + 1);
                     }
-                    std::wstring hexString = AsciiToHex(text.c_str());
+                    std::wstring hexString = text.c_str();
                     SaveHexToFile(currentFileName, hexString);
                 }
             }
@@ -647,16 +1098,15 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             StopWordCountThread();
             break;
         }
-
         case WM_CLOSE: {
             if (hThread != nullptr) {
+                DeleteCriticalSection(&g_csWordCount);
                 TerminateThread(hThread, 0);
                 CloseHandle(hThread);
             }
             DestroyWindow(hWnd);
             break;
         }
-
 
         case IDM_EXIT:
             PostQuitMessage(0);
@@ -666,7 +1116,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 
        
     case WM_DESTROY:
-
         PostQuitMessage(0);
         break;
 
